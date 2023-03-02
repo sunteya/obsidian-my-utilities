@@ -1,137 +1,196 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, WorkspaceLeaf, TFile, TFolder } from 'obsidian'
 
 // Remember to rename these classes and interfaces!
 
 interface MyPluginSettings {
-	mySetting: string;
+  mySetting: string
 }
 
 const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+  mySetting: 'default'
+}
+
+function isLinkFolder(folder: TFolder) {
+  return folder.name == "@" || folder.name == "_links"
+}
+
+async function moveActiveFileLinksToInside() {
+  const file = app.workspace.getActiveFile()
+  if (file == null) {
+    return
+  }
+
+  const targetFolderPath = file.parent.path + "/@"
+  const cache = app.metadataCache.getFileCache(file)
+  if (cache == null) {
+    return
+  }
+
+  const sources: TFile[] = []
+  for (const link of cache.links ?? []) {
+    const linkFile = app.metadataCache.getFirstLinkpathDest(link.link, file.path)
+    if (linkFile == null) {
+      continue
+    }
+
+    if (isLinkFolder(linkFile.parent) && linkFile.parent.path != targetFolderPath) {
+      sources.push(linkFile)
+    }
+  }
+
+  if (sources.length > 0 && !file.parent.children.find(it => it.path == targetFolderPath)) {
+    await file.vault.createFolder(targetFolderPath)
+  }
+
+  for (const source of sources) {
+    const targetPath = targetFolderPath + "/" + source.name
+    await app.fileManager.renameFile(source, targetPath)
+  }
+}
+
+function fileExplorerCollapseActiveFile() {
+  const leaf = app.workspace.getLeavesOfType('file-explorer').first()!
+  const items = getExplorerItems(leaf)
+  const activeFile = app.workspace.getActiveFile()
+  const activeFolder = activeFile?.parent
+
+  for (const item of items) {
+    if (explorerItemIsFolder(item) && item.file === activeFolder) {
+      item.setCollapsed?.(true)
+    }
+  }
+}
+
+function fileExplorerCollapseAll() {
+  const leaf = app.workspace.getLeavesOfType('file-explorer').first()!
+  const items = getExplorerItems(leaf)
+  for (const item of items) {
+    if (explorerItemIsFolder(item)) {
+      item.setCollapsed?.(true)
+    }
+  }
+}
+
+interface FileExplorerItem {
+  file: TFile | TFolder
+  collapsed?: boolean
+  setCollapsed?: (state: boolean) => void
+}
+
+function explorerItemIsFolder(item: FileExplorerItem): boolean {
+  return (
+    item.file instanceof TFolder &&
+    item.file.path !== '/' &&
+    item.collapsed !== undefined
+  )
+}
+
+function getExplorerItems(leaf: WorkspaceLeaf): FileExplorerItem[] {
+  return Object.values((leaf.view as any).fileItems) as FileExplorerItem[]
+}
+
+function copyActiveFileName() {
+  const file = app.workspace.getActiveFile()
+  if (!file) {
+    return
+  }
+
+  navigator.clipboard.writeText(file.basename)
 }
 
 export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+  settings: MyPluginSettings
 
-	async onload() {
-		await this.loadSettings();
+  async onload() {
+    await this.loadSettings()
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
+    // This adds a status bar item to the bottom of the app. Does not work on mobile apps.
+    const statusBarItemEl = this.addStatusBarItem()
+    statusBarItemEl.setText('Status Bar Text')
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
+    this.addCommand({
+      id: 'file-explorer-collapse-all',
+      name: 'File Explorer Collapse All',
+      callback: fileExplorerCollapseAll
+    })
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
+    this.addCommand({
+      id: 'file-explorer-collapse-active-file',
+      name: 'File Explorer Collapse Active File',
+      callback: fileExplorerCollapseActiveFile
+    })
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			}
-		});
+    this.addCommand({
+      id: 'copy-active-file-name',
+      name: 'Copy Active File Name',
+      callback: copyActiveFileName
+    })
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+    this.addCommand({
+      id: 'move-active-file-links-to-inside',
+      name: 'Move Active File Links To Inside',
+      callback: moveActiveFileLinksToInside
+    })
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-	}
+    // This adds a settings tab so the user can configure various aspects of the plugin
+    this.addSettingTab(new SampleSettingTab(this.app, this))
+  }
 
-	onunload() {
+  onunload() {
 
-	}
+  }
 
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-	}
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData())
+  }
 
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
+  async saveSettings() {
+    await this.saveData(this.settings)
+  }
 }
 
 class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+  constructor(app: App) {
+    super(app)
+  }
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
+  onOpen() {
+    const {contentEl} = this
+    contentEl.setText('Woah!')
+  }
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
+  onClose() {
+    const {contentEl} = this
+    contentEl.empty()
+  }
 }
 
 class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
+  plugin: MyPlugin
 
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
+  constructor(app: App, plugin: MyPlugin) {
+    super(app, plugin)
+    this.plugin = plugin
+  }
 
-	display(): void {
-		const {containerEl} = this;
+  display(): void {
+    const {containerEl} = this
 
-		containerEl.empty();
+    containerEl.empty()
 
-		containerEl.createEl('h2', {text: 'Settings for my awesome plugin.'});
+    containerEl.createEl('h2', {text: 'Settings for my awesome plugin.'})
 
-		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					console.log('Secret: ' + value);
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
-	}
+    new Setting(containerEl)
+      .setName('Setting #1')
+      .setDesc('It\'s a secret')
+      .addText(text => text
+        .setPlaceholder('Enter your secret')
+        .setValue(this.plugin.settings.mySetting)
+        .onChange(async (value) => {
+          console.log('Secret: ' + value)
+          this.plugin.settings.mySetting = value
+          await this.plugin.saveSettings()
+        }))
+  }
 }
